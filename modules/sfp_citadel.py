@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
-# Name:         sfp_citadel
-# Purpose:      SpiderFoot plug-in to search citadel.pw using their API, for
-#               potential data breaches.
+# Name:        sfp_citadel
+# Purpose:     SpiderFoot plug-in to search Leak-Lookup using their API,
+#              for potential data breaches.
 #
 # Author:      sn <citadel.pw@protonmail.com>
 #
@@ -11,10 +11,11 @@
 # -------------------------------------------------------------------------------
 
 import json
+import urllib.request, urllib.parse, urllib.error
 from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 
 class sfp_citadel(SpiderFootPlugin):
-    """Citadel Engine:Footprint,Investigate,Passive:Leaks, Dumps and Breaches:apikey:Searches citadel.pw's database of breaches."""
+    """Citadel Engine:Footprint,Investigate,Passive:Leaks, Dumps and Breaches:apikey:Searches Leak-Lookup.com's database of breaches."""
 
     # Default options
     opts = {
@@ -22,18 +23,18 @@ class sfp_citadel(SpiderFootPlugin):
         "timeout": 60
     }
     optdescs = {
-        "api_key": "citadel.pw API key. Without this you're limited to the public API.",
+        "api_key": "Leak-Lookup API key. Without this you're limited to the public API.",
         "timeout": "Custom timeout due to heavy traffic at times."
     }
 
-    results = dict()
+    results = None
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
-        self.results = dict()
-        self.__dataSource__ = "Citadel.pw"
+        self.results = self.tempStorage()
+        self.__dataSource__ = "Leak-Lookup.com"
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
@@ -46,52 +47,77 @@ class sfp_citadel(SpiderFootPlugin):
     def producedEvents(self):
         return ["EMAILADDR_COMPROMISED"]
 
+    # Query email address
+    # https://leak-lookup.com/api
+    def queryEmail(self, email):
+        apikey = self.opts['api_key']
+
+        if not apikey:
+            # Public API key
+            apikey = "3edfb5603418f101926c64ca5dd0e409"
+
+        params = {
+            'query': email.encode('raw_unicode_escape').decode("ascii", errors='replace'),
+            'type': 'email_address',
+            'key': apikey
+        }
+
+        res = self.sf.fetchUrl("https://leak-lookup.com/api/search",
+                               postData=urllib.parse.urlencode(params),
+                               timeout=self.opts['timeout'],
+                               useragent=self.opts['_useragent'])
+
+        if res['content'] is None:
+            self.sf.debug('No response from Leak-Lookup.com')
+            return None
+
+        try:
+            data = json.loads(res['content'])
+        except BaseException as e:
+            self.sf.debug('Error processing JSON response: ' + str(e))
+            return None
+
+        return data
+
     # Handle events sent to this module
     def handleEvent(self, event):
         eventName = event.eventType
         srcModuleName = event.module
         eventData = event.data
 
-        try:
-            self.sf.debug("Received event, " + eventName + ", from " + srcModuleName)
+        self.sf.debug("Received event, " + eventName + ", from " + srcModuleName)
 
-            # Don't look up stuff twice
-            if eventData in self.results:
-                self.sf.debug("Skipping " + eventData + " as already searched.")
+        if self.errorState:
+            return None
+
+        # Don't look up stuff twice
+        if eventData in self.results:
+            self.sf.debug("Skipping " + eventData + " as already searched.")
+            return None
+
+        self.results[eventData] = True
+
+        data = self.queryEmail(eventData)
+
+        if data is None:
+            return None
+
+        error = data.get('error')
+        message = data.get('message')
+
+        if error == 'true':
+            self.sf.error("Error encountered processing {}: {}".format( eventData, message ), False)
+            if "MISSING API" in message:
+                self.errorState = True
                 return None
-            else:
-                self.results[eventData] = True
+            return None
 
-            if self.opts['api_key']:
-                url = "http://citadel.pw/api.php?api=" + self.opts['api_key'] + \
-                      "&query="
-            else:
-                public_api = "6ce4f0a0c7b776809adb0f90473ea0e4"
-                url = "http://citadel.pw/api.php?api=" + public_api + "&query="
+        if not message:
+            return None
 
-            res = self.sf.fetchUrl(url + eventData, timeout=self.opts['timeout'], 
-                                   useragent=self.opts['_useragent'])
-
-            if res['content'] is None or "{error" in res['content']:
-                self.sf.error("Error encountered processing " + eventData, False)
-                return None
-
-            data = json.loads(res['content'])
-
-            if "site" in data[0]:
-                for record in data:
-                    self.sf.info("Found Citadel entry for " + eventData + ": " + \
-                                 record["site"])
-                    t = "EMAILADDR_COMPROMISED"
-                    evt = SpiderFootEvent(t, eventData + " [" + record["site"] + "]", 
-                                          self.__name__, event)
-                    self.notifyListeners(evt)
-                return None
-
-        except Exception as ex:
-            template = "An exception of type {0} occurred. Arguments:\n{1!r}"
-            message = template.format(type(ex).__name__, ex.args)
-            self.sf.error(message)
+        for site in message:
+            self.sf.info("Found Leak-Lookup entry for {}: {}".format( eventData, site ) )
+            evt = SpiderFootEvent( "EMAILADDR_COMPROMISED", "{} [{}]".format( eventData, site ), self.__name__, event )
+            self.notifyListeners(evt)
 
 # End of sfp_citadel class
-

@@ -16,18 +16,25 @@ from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 
 
 class sfp_googlemaps(SpiderFootPlugin):
-    """Google Maps:Footprint,Investigate,Passive:Real World::Identifies potential physical addresses and latitude/longitude coordinates."""
+    """Google Maps:Footprint,Investigate,Passive:Real World:apikey:Identifies potential physical addresses and latitude/longitude coordinates."""
 
 
     # Default options
-    opts = {}
-    results = dict()
+    opts = {
+        "api_key": ""
+    }
+    optdescs = {
+        "api_key": "Google Geocoding API Key."
+    }
+    results = None
+    errorState = False
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
-        self.results = dict()
+        self.results = self.tempStorage()
+        self.errorState = False
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
@@ -46,7 +53,15 @@ class sfp_googlemaps(SpiderFootPlugin):
         srcModuleName = event.module
         eventData = event.data
 
+        if self.errorState:
+            return None
+
         self.sf.debug("Received event, " + eventName + ", from " + srcModuleName)
+
+        if self.opts['api_key'] == "":
+            self.sf.error("You enabled sfp_googlemaps but did not set an API key!", False)
+            self.errorState = True
+            return None
 
         # Don't look up stuff twice
         if eventData in self.results:
@@ -56,13 +71,14 @@ class sfp_googlemaps(SpiderFootPlugin):
             self.results[eventData] = True
 
         res = self.sf.fetchUrl("https://maps.googleapis.com/maps/api/geocode/json?address=" + \
-                               eventData, timeout=self.opts['_fetchtimeout'], 
+                               eventData + "&key=" + self.opts['api_key'],
+                               timeout=self.opts['_fetchtimeout'],
                                useragent=self.opts['_useragent'])
         if res['content'] is None:
             self.sf.info("No location info found for " + eventData)
             return None
 
-        evt = SpiderFootEvent("SEARCH_ENGINE_WEB_CONTENT", res['content'], 
+        evt = SpiderFootEvent("SEARCH_ENGINE_WEB_CONTENT", res['content'],
                               self.__name__, event)
         self.notifyListeners(evt)
 
@@ -74,12 +90,12 @@ class sfp_googlemaps(SpiderFootPlugin):
                 if 'geometry' in data:
                         lat = str(data['geometry']['location']['lat'])
                         lng = str(data['geometry']['location']['lng'])
-                        evt = SpiderFootEvent("PHYSICAL_COORDINATES", lat + "," + lng, 
+                        evt = SpiderFootEvent("PHYSICAL_COORDINATES", lat + "," + lng,
                                               self.__name__, event)
                         self.notifyListeners(evt)
 
             if 'formatted_address' in data:
-                evt = SpiderFootEvent("PHYSICAL_ADDRESS", data['formatted_address'], 
+                evt = SpiderFootEvent("PHYSICAL_ADDRESS", data['formatted_address'],
                                       self.__name__, event)
                 self.notifyListeners(evt)
         except Exception as e:

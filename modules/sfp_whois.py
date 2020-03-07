@@ -11,13 +11,13 @@
 # Licence:     GPL
 # -------------------------------------------------------------------------------
 
-import pythonwhois
+import whois
+import ipwhois
+from netaddr import IPAddress
 from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
-
 
 class sfp_whois(SpiderFootPlugin):
     """Whois:Footprint,Investigate,Passive:Public Registries::Perform a WHOIS look-up on domain names and owned netblocks."""
-
 
     # Default options
     opts = {
@@ -27,25 +27,27 @@ class sfp_whois(SpiderFootPlugin):
     optdescs = {
     }
 
-    results = list()
+    results = None
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
+        self.results = self.tempStorage()
 
-        self.results = list()
-
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
     def watchedEvents(self):
-        return ["DOMAIN_NAME", "DOMAIN_NAME_PARENT", "NETBLOCK_OWNER" ]
+        return ["DOMAIN_NAME", "DOMAIN_NAME_PARENT", "NETBLOCK_OWNER",
+                "CO_HOSTED_SITE_DOMAIN", "AFFILIATE_DOMAIN_NAME", "SIMILARDOMAIN" ]
 
     # What events this module produces
     # This is to support the end user in selecting modules based on events
     # produced.
     def producedEvents(self):
-        return ["DOMAIN_WHOIS", "NETBLOCK_WHOIS", "DOMAIN_REGISTRAR"]
+        return ["DOMAIN_WHOIS", "NETBLOCK_WHOIS", "DOMAIN_REGISTRAR",
+                "CO_HOSTED_SITE_DOMAIN_WHOIS", "AFFILIATE_DOMAIN_WHOIS",
+                "SIMILARDOMAIN_WHOIS"]
 
     # Handle events sent to this module
     def handleEvent(self, event):
@@ -56,42 +58,53 @@ class sfp_whois(SpiderFootPlugin):
         if eventData in self.results:
             return None
         else:
-            self.results.append(eventData)
+            self.results[eventData] = True
 
         self.sf.debug("Received event, " + eventName + ", from " + srcModuleName)
 
         try:
-            rawwhois = pythonwhois.net.get_whois_raw(eventData)
-            try:
-                data = unicode('\n'.join(rawwhois), 'utf-8', errors='replace')
-            except BaseException as e:
-                    data = '\n'.join(rawwhois)
+            data = None
+            if eventName != "NETBLOCK_OWNER":
+                whoisdata = whois.whois(eventData)
+                if whoisdata:
+                    data = whoisdata.text
+            else:
+                qry = eventData.split("/")[0]
+                ip = IPAddress(qry) + 1
+                self.sf.debug("Querying for IP ownership of " + str(ip))
+                r = ipwhois.IPWhois(ip)
+                whoisdata = r.lookup_rdap(depth=1)
+                if whoisdata:
+                    data = str(whoisdata)
+            if not data:
+                self.sf.error("Unable to perform WHOIS on " + eventData, False)
+                return None
         except BaseException as e:
             self.sf.error("Unable to perform WHOIS on " + eventData + ": " + str(e), False)
             return None
 
+        # This is likely to be an error about being throttled rather than real data
+        if len(data) < 250:
+            self.sf.error("Throttling from Whois is probably happening.", False)
+            return None
+
         if eventName.startswith("DOMAIN_NAME"):
             typ = "DOMAIN_WHOIS"
-        else:
+        if eventName.startswith("NETBLOCK"):
             typ = "NETBLOCK_WHOIS"
+        if eventName.startswith("AFFILIATE_DOMAIN_NAME"):
+            typ = "AFFILIATE_DOMAIN_WHOIS"
+        if eventName.startswith("CO_HOSTED_SITE_DOMAIN"):
+            typ = "CO_HOSTED_SITE_DOMAIN_WHOIS"
+        if eventName == "SIMILARDOMAIN":
+            typ = "SIMILARDOMAIN_WHOIS"
 
         rawevt = SpiderFootEvent(typ, data, self.__name__, event)
         self.notifyListeners(rawevt)
 
-        try:
-            info = pythonwhois.parse.parse_raw_whois(rawwhois, True)
-            newinfo = {}
-            for k, v in info.items():
-                newinfo[k.lower()] = v
-            info = newinfo
-            #print str(info)
-        except BaseException as e:
-            self.sf.debug("Error parsing whois data for " + eventData)
-            return None
-
-        if info.has_key('registrar'):
-            if eventName.startswith("DOMAIN_NAME") and info['registrar'] is not None:
-                evt = SpiderFootEvent("DOMAIN_REGISTRAR", info['registrar'][0],
+        if 'registrar' in whoisdata:
+            if eventName.startswith("DOMAIN_NAME") and whoisdata['registrar'] is not None:
+                evt = SpiderFootEvent("DOMAIN_REGISTRAR", whoisdata['registrar'],
                                       self.__name__, event)
                 self.notifyListeners(evt)
 

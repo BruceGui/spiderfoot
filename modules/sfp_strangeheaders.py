@@ -11,6 +11,7 @@
 # Licence:     GPL
 # -------------------------------------------------------------------------------
 
+import json
 from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 
 # Standard headers, taken from http://en.wikipedia.org/wiki/List_of_HTTP_header_fields
@@ -23,22 +24,20 @@ headers = ["access-control-allow-origin", "accept-ranges", "age", "allow", "cach
            "x-frame-options", "x-xss-protection", "content-security-policy", "x-content-security-policy",
            "x-webkit-csp", "x-content-type-options", "x-powered-by", "x-ua-compatible"]
 
-
 class sfp_strangeheaders(SpiderFootPlugin):
-    """Strange Headers:Footprint:Content Analysis::Obtain non-standard HTTP headers returned by web servers."""
-
+    """Strange Headers:Footprint,Passive:Content Analysis::Obtain non-standard HTTP headers returned by web servers."""
 
     # Default options
     opts = {}
 
-    results = dict()
+    results = None
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
-        self.results = dict()
+        self.results = self.tempStorage()
         self.__dataSource__ = "Target Website"
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
@@ -56,8 +55,7 @@ class sfp_strangeheaders(SpiderFootPlugin):
         eventName = event.eventType
         srcModuleName = event.module
         eventData = event.data
-        parentEvent = event.sourceEvent
-        eventSource = event.sourceEvent.data
+        eventSource = event.actualSource
 
         self.sf.debug("Received event, " + eventName + ", from " + srcModuleName)
         if eventSource in self.results:
@@ -69,11 +67,19 @@ class sfp_strangeheaders(SpiderFootPlugin):
             self.sf.debug("Not collecting header information for external sites.")
             return None
 
-        for key in eventData:
+        try:
+            jdata = json.loads(eventData)
+            if jdata == None:
+                return None
+        except BaseException as e:
+            self.sf.error("Received HTTP headers from another module in an unexpected format.", False)
+            return None
+
+        for key in jdata:
             if key.lower() not in headers:
-                val = key + ": " + eventData[key]
+                val = key + ": " + jdata[key]
                 evt = SpiderFootEvent("WEBSERVER_STRANGEHEADER", val,
-                                      self.__name__, parentEvent)
+                                      self.__name__, event)
                 self.notifyListeners(evt)
 
 # End of sfp_strangeheaders class

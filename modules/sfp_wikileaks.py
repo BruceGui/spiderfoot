@@ -10,15 +10,12 @@
 # Licence:     GPL
 # -------------------------------------------------------------------------------
 
-import re
-import socket
 import datetime
 from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 
 
 class sfp_wikileaks(SpiderFootPlugin):
-    """Wikileaks:Footprint,Investigate,Passive:Leaks, Dumps and Breaches:errorprone:Search Wikileaks for mentions of domain names and e-mail addresses."""
-
+    """Wikileaks:Footprint,Investigate,Passive:Leaks, Dumps and Breaches::Search Wikileaks for mentions of domain names and e-mail addresses."""
 
     # Default options
     opts = {
@@ -32,18 +29,18 @@ class sfp_wikileaks(SpiderFootPlugin):
         'external': "Include external leak sources such as Associated Twitter accounts, Snowden + Hammond Documents, Cryptome Documents, ICWatch, This Day in WikiLeaks Blog and WikiLeaks Press, WL Central."
     }
 
-    results = list()
+    results = None
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
-        self.results = list()
+        self.results = self.tempStorage()
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
     def watchedEvents(self):
-        return ["DOMAIN_NAME", "EMAILADDR"]
+        return ["DOMAIN_NAME", "EMAILADDR", "HUMAN_NAME"]
 
     # What events this module produces
     # This is to support the end user in selecting modules based on events
@@ -65,7 +62,7 @@ class sfp_wikileaks(SpiderFootPlugin):
             self.sf.debug("Skipping " + eventData + " as already mapped.")
             return None
         else:
-            self.results.append(eventData)
+            self.results[eventData] = True
 
         if self.opts['external']:
             external = "True"
@@ -78,7 +75,8 @@ class sfp_wikileaks(SpiderFootPlugin):
         else:
             maxDate = ""
 
-        wlurl = "https://search.wikileaks.org/?query=%22" + eventData + "%22" + \
+        qdata = eventData.replace(" ", "+")
+        wlurl = "https://search.wikileaks.org/?query=%22" + qdata + "%22" + \
               "&released_date_start=" + maxDate + "&include_external_sources=" + \
               external + "&new_search=True&order_by=most_relevant#results"
         res = self.sf.fetchUrl(wlurl)
@@ -88,24 +86,36 @@ class sfp_wikileaks(SpiderFootPlugin):
 
         # Fetch the paste site content
         links = dict()
-        links.update(self.sf.parseLinks(wlurl, res['content'], "wikileaks.org"))
-        links.update(self.sf.parseLinks(wlurl, res['content'], "cryptome.org"))
+        p = self.sf.parseLinks(wlurl, res['content'], "wikileaks.org")
+        if p:
+            links.update(p)
+
+        p = self.sf.parseLinks(wlurl, res['content'], "cryptome.org")
+        if p:
+            links.update(p)
+
         keepGoing = True
         page = 0
         while keepGoing:
+            if not res['content']:
+                break
+
             if "page=" not in res['content']:
                 keepGoing = False
 
             valid = False
             for link in links:
+                if "search.wikileaks.org/" in link:
+                    continue
+
                 # We can safely skip search.wikileaks.org and others.
-                if not link.startswith("https://wikileaks.org/") and not link.startswith("https://cryptome.org/"):
+                if "wikileaks.org/" not in link and "cryptome.org/" not in link:
                     continue
                 else:
                     self.sf.debug("Found a link: " + link)
                     if self.checkForStop():
                         return None
-    
+
                     # Wikileaks leak links will have a nested folder structure link
                     if link.count('/') >= 4:
                         if not link.endswith(".js") and not link.endswith(".css"):
@@ -114,7 +124,7 @@ class sfp_wikileaks(SpiderFootPlugin):
                             valid = True
 
             if valid:
-                evt = SpiderFootEvent("SEARCH_ENGINE_WEB_CONTENT", res['content'], 
+                evt = SpiderFootEvent("SEARCH_ENGINE_WEB_CONTENT", res['content'],
                                       self.__name__, event)
                 self.notifyListeners(evt)
 
@@ -124,14 +134,22 @@ class sfp_wikileaks(SpiderFootPlugin):
 
             if keepGoing:
                 page += 1
-                wlurl = "https://search.wikileaks.org/?query=%22" + eventData + "%22" + \
+                wlurl = "https://search.wikileaks.org/?query=%22" + qdata + "%22" + \
                         "&released_date_start=" + maxDate + "&include_external_sources=" + \
                         external + "&new_search=True&order_by=most_relevant&page=" + \
                         str(page) + "#results"
                 res = self.sf.fetchUrl(wlurl)
+                if not res['content']:
+                    break
+
                 # Fetch the paste site content
                 links = dict()
-                links.update(self.sf.parseLinks(wlurl, res['content'], "wikileaks.org"))
-                links.update(self.sf.parseLinks(wlurl, res['content'], "cryptome.org"))
+                p = self.sf.parseLinks(wlurl, res['content'], "wikileaks.org")
+                if p:
+                    links.update(p)
+
+                p = self.sf.parseLinks(wlurl, res['content'], "cryptome.org")
+                if p:
+                    links.update(p)
 
 # End of sfp_wikileaks class

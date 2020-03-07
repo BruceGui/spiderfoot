@@ -21,7 +21,6 @@ from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 class sfp_xforce(SpiderFootPlugin):
     """XForce Exchange:Investigate,Passive:Reputation Systems:apikey:Obtain information from IBM X-Force Exchange"""
 
-
     # Default options
     opts = {
         "xforce_api_key": "",
@@ -30,34 +29,40 @@ class sfp_xforce(SpiderFootPlugin):
         'netblocklookup': True,
         'maxnetblock': 24,
         'subnetlookup': True,
-        'maxsubnet': 24
+        'maxsubnet': 24,
+        'maxcohost': 100,
+        'checkaffiliates': True
     }
 
     # Option descriptions
     optdescs = {
-        "xforce_api_key": "The X-Force Exchange API Key",
-        "xforce_api_key_password": "The X-Force Exchange API Password",
+        "xforce_api_key": "X-Force Exchange API Key.",
+        "xforce_api_key_password": "X-Force Exchange API Password.",
         "age_limit_days": "Ignore any records older than this many days. 0 = unlimited.",
         'netblocklookup': "Look up all IPs on netblocks deemed to be owned by your target for possible blacklisted hosts on the same target subdomain/domain?",
         'maxnetblock': "If looking up owned netblocks, the maximum netblock size to look up all IPs within (CIDR value, 24 = /24, 16 = /16, etc.)",
         'subnetlookup': "Look up all IPs on subnets which your target is a part of for blacklisting?",
-        'maxsubnet': "If looking up subnets, the maximum subnet size to look up all the IPs within (CIDR value, 24 = /24, 16 = /16, etc.)"
+        'maxsubnet': "If looking up subnets, the maximum subnet size to look up all the IPs within (CIDR value, 24 = /24, 16 = /16, etc.)",
+        'maxcohost': "Stop reporting co-hosted sites after this many are found, as it would likely indicate web hosting.",
+        'checkaffiliates': "Apply checks to affiliates?"
     }
 
     # Be sure to completely clear any class variables in setup()
     # or you run the risk of data persisting between scan runs.
 
-    results = dict()
+    results = None
     errorState = False
+    cohostcount = 0
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
-        self.results = dict()
+        self.results = self.tempStorage()
+        self.cohostcount = 0
 
         # Clear / reset any other class member variables here
         # or you risk them persisting between threads.
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
@@ -80,12 +85,20 @@ class sfp_xforce(SpiderFootPlugin):
             querytype = "ipr/malware"
 
         xforce_url = "https://api.xforce.ibmcloud.com"
+
+        api_key = self.opts['xforce_api_key']
+        if type(api_key) == str:
+            api_key = api_key.encode('utf-8')
+        api_key_password = self.opts['xforce_api_key_password']
+        if type(api_key_password) == str:
+            api_key_password = api_key_password.encode('utf-8')
+        token = base64.b64encode(api_key + ":".encode('utf-8') + api_key_password)
         headers = {
             'Accept': 'application/json',
-            'Authorization': "Basic " + base64.b64encode(self.opts['xforce_api_key'] + ":" + self.opts['xforce_api_key_password'])
+            'Authorization': "Basic " + token.decode('utf-8')
         }
         url = xforce_url + "/" + querytype + "/" + qry
-        res = self.sf.fetchUrl(url , timeout=self.opts['_fetchtimeout'], useragent="SpiderFoot", headers=headers)
+        res = self.sf.fetchUrl(url, timeout=self.opts['_fetchtimeout'], useragent="SpiderFoot", headers=headers)
 
         if res['code'] in [ "400", "401", "402", "403" ]:
             self.sf.error("XForce API key seems to have been rejected or you have exceeded usage limits for the month.", False)
@@ -150,6 +163,9 @@ class sfp_xforce(SpiderFootPlugin):
                                   str(self.opts['maxsubnet']))
                     return None
 
+        if eventName.startswith('AFFILIATE_') and not self.opts.get('checkaffiliates', False):
+            return None
+
         qrylist = list()
         if eventName.startswith("NETBLOCK_"):
             for ipaddr in IPNetwork(eventData):
@@ -161,6 +177,9 @@ class sfp_xforce(SpiderFootPlugin):
         # For IP Addresses, do the additional passive DNS lookup
         if eventName == "IP_ADDRESS":
             evtType = "CO_HOSTED_SITE"
+            if self.cohostcount > self.opts['maxcohost']:
+                return None
+
             ret = self.query(eventData, "resolve")
             if ret is None:
                 self.sf.info("No Passive DNS info for " + eventData)
@@ -182,6 +201,7 @@ class sfp_xforce(SpiderFootPlugin):
                         else:
                             e = SpiderFootEvent(evtType, host, self.__name__, event)
                             self.notifyListeners(e)
+                            self.cohostcount += 1
 
         for addr in qrylist:
             if self.checkForStop():

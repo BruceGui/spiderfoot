@@ -16,10 +16,12 @@ from sflib import SpiderFoot, SpiderFootPlugin
 
 class sfp__stor_db(SpiderFootPlugin):
     """Storage::::Stores scan results into the back-end SpiderFoot database. You will need this."""
+    _priority = 0
 
     # Default options
     opts = {
-        'maxstorage': 1024  # max bytes for any piece of info stored (0 = unlimited)
+        'maxstorage': 1024,  # max bytes for any piece of info stored (0 = unlimited)
+        '_store': True
     }
 
     # Option descriptions
@@ -30,7 +32,7 @@ class sfp__stor_db(SpiderFootPlugin):
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
@@ -41,6 +43,9 @@ class sfp__stor_db(SpiderFootPlugin):
 
     # Handle events sent to this module
     def handleEvent(self, sfEvent):
+        if not self.opts['_store']:
+            return None
+
         if self.opts['maxstorage'] != 0:
             if len(sfEvent.data) > self.opts['maxstorage']:
                 self.sf.debug("Storing an event: " + sfEvent.eventType)

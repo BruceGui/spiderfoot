@@ -11,7 +11,6 @@
 # -------------------------------------------------------------------------------
 
 import json
-import base64
 from datetime import datetime
 import time
 from netaddr import IPNetwork
@@ -19,7 +18,6 @@ from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 
 class sfp_alienvault(SpiderFootPlugin):
     """AlienVault OTX:Investigate,Passive:Reputation Systems:apikey:Obtain information from AlienVault Open Threat Exchange (OTX)"""
-
 
     # Default options
     opts = {
@@ -29,48 +27,46 @@ class sfp_alienvault(SpiderFootPlugin):
         'netblocklookup': True,
         'maxnetblock': 24,
         'subnetlookup': True,
-        'maxsubnet': 24
+        'maxsubnet': 24,
+        'checkaffiliates': True
     }
 
     # Option descriptions
     optdescs = {
-        "api_key": "Your AlienVault OTX API Key",
+        "api_key": "AlienVault OTX API Key.",
         "age_limit_days": "Ignore any records older than this many days. 0 = unlimited.",
         "threat_score_min": "Minimum AlienVault threat score.",
         'netblocklookup': "Look up all IPs on netblocks deemed to be owned by your target for possible blacklisted hosts on the same target subdomain/domain?",
         'maxnetblock': "If looking up owned netblocks, the maximum netblock size to look up all IPs within (CIDR value, 24 = /24, 16 = /16, etc.)",
         'subnetlookup': "Look up all IPs on subnets which your target is a part of for blacklisting?",
-        'maxsubnet': "If looking up subnets, the maximum subnet size to look up all the IPs within (CIDR value, 24 = /24, 16 = /16, etc.)"
+        'maxsubnet': "If looking up subnets, the maximum subnet size to look up all the IPs within (CIDR value, 24 = /24, 16 = /16, etc.)",
+        'checkaffiliates': "Apply checks to affiliates?"
     }
 
     # Be sure to completely clear any class variables in setup()
     # or you run the risk of data persisting between scan runs.
 
-    results = dict()
+    results = None
     errorState = False
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
-        self.results = dict()
+        self.results = self.tempStorage()
 
         # Clear / reset any other class member variables here
         # or you risk them persisting between threads.
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
     def watchedEvents(self):
-        return ["IP_ADDRESS", "AFFILIATE_IPADDR", "INTERNET_NAME",
-                "CO_HOSTED_SITE", "NETBLOCK_OWNER", "NETBLOCK_MEMBER",
-                "AFFILIATE_INTERNET_NAME", "IPV6_ADDRESS"]
+        return ["IP_ADDRESS", "AFFILIATE_IPADDR",
+                "NETBLOCK_OWNER", "NETBLOCK_MEMBER"]
 
     # What events this module produces
     def producedEvents(self):
-        return ["MALICIOUS_IPADDR", "MALICIOUS_INTERNET_NAME",
-                "MALICIOUS_COHOST", "MALICIOUS_AFFILIATE_INTERNET_NAME",
-                "MALICIOUS_AFFILIATE_IPADDR", "MALICIOUS_NETBLOCK",
-                "CO_HOSTED_SITE"]
+        return ["MALICIOUS_IPADDR", "MALICIOUS_AFFILIATE_IPADDR", "MALICIOUS_NETBLOCK" ]
 
     def query(self, qry, querytype):
         ret = None
@@ -91,7 +87,7 @@ class sfp_alienvault(SpiderFootPlugin):
             'Accept': 'application/json',
             'X-OTX-API-KEY': self.opts['api_key']
         }
-        res = self.sf.fetchUrl(url, timeout=self.opts['_fetchtimeout'], 
+        res = self.sf.fetchUrl(url, timeout=self.opts['_fetchtimeout'],
                                useragent="SpiderFoot", headers=headers)
 
         if res['code'] == "403":
@@ -145,6 +141,9 @@ class sfp_alienvault(SpiderFootPlugin):
                                   str(self.opts['maxnetblock']))
                     return None
 
+        if eventName == 'AFFILIATE_IPADDR' and not self.opts.get('checkaffiliates', False):
+            return None
+
         if eventName == 'NETBLOCK_MEMBER':
             if not self.opts['subnetlookup']:
                 return None
@@ -196,12 +195,6 @@ class sfp_alienvault(SpiderFootPlugin):
                 evtType = 'MALICIOUS_IPADDR'
             if eventName == "AFFILIATE_IPADDR":
                 evtType = 'MALICIOUS_AFFILIATE_IPADDR'
-            if eventName == "INTERNET_NAME":
-                evtType = "MALICIOUS_INTERNET_NAME"
-            if eventName == 'AFFILIATE_INTERNET_NAME':
-                evtType = 'MALICIOUS_AFFILIATE_INTERNET_NAME'
-            if eventName == 'CO_HOSTED_SITE':
-                evtType = 'MALICIOUS_COHOST'
 
             rec = self.query(addr, "reputation")
             if rec is not None:
@@ -210,10 +203,13 @@ class sfp_alienvault(SpiderFootPlugin):
                     rec_history = rec['reputation'].get("activities", list())
                     if rec['reputation']['threat_score'] < self.opts['threat_score_min']:
                         continue
-                    descr = "Threat Score: " + str(rec['reputation']['threat_score']) + ":"
+                    descr = "AlienVault Threat Score: " + str(rec['reputation']['threat_score']) + ":"
 
                     for result in rec_history:
-                        descr += "\n - " + result.get("name", "")
+                        nm = result.get("name", None)
+                        if nm is None or nm in descr:
+                            continue
+                        descr += "\n - " + nm
                         created = result.get("last_date", "")
                         # 2014-11-06T10:45:00.000
                         try:

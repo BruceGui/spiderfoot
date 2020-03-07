@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
 # Name:         sfp_ripe
-# Purpose:      Queries Internet registryes like RIPE (incl. ARIN) to get 
+# Purpose:      Queries Internet registryes like RIPE (incl. ARIN) to get
 #               netblocks and other bits of info.
 #
 # Author:      Steve Micallef <steve@binarypool.com>
@@ -12,6 +12,7 @@
 # -------------------------------------------------------------------------------
 
 import re
+
 import json
 from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 
@@ -23,20 +24,22 @@ class sfp_ripe(SpiderFootPlugin):
     # Default options
     opts = {}
 
-    results = dict()
+    results = None
     currentEventSrc = None
-    memCache = dict()
-    nbreported = dict()
+    memCache = None
+    nbreported = None
     keywords = None
+    lastContent = None
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
-        self.results = dict()
-        self.memCache = dict()
+        self.results = self.tempStorage()
+        self.memCache = self.tempStorage()
         self.currentEventSrc = None
-        self.nbreported = dict()
+        self.nbreported = self.tempStorage()
+        self.lastContent = None
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
@@ -60,9 +63,7 @@ class sfp_ripe(SpiderFootPlugin):
                                    useragent=self.opts['_useragent'])
             if res['content'] is not None:
                 self.memCache[url] = res
-                evt = SpiderFootEvent("RAW_RIR_DATA", res['content'], self.__name__,
-                                      self.currentEventSrc)
-                self.notifyListeners(evt)
+                self.lastContent = res['content']
         return res
 
     # Get the netblock the IP resides in
@@ -80,7 +81,7 @@ class sfp_ripe(SpiderFootPlugin):
             self.sf.debug("Error processing JSON response.")
             return None
 
-        prefix = j["data"]["prefix"]
+        prefix = j["data"].get("prefix")
         if prefix is None:
             self.sf.debug("Could not identify network prefix.")
             return None
@@ -119,6 +120,8 @@ class sfp_ripe(SpiderFootPlugin):
     # Owner information about an AS
     def asOwnerInfo(self, asn):
         ownerinfo = dict()
+        # Which keys to look for ownership information in (prefix)
+        ownerkeys = [ "as", "value", "auth", "desc", "org", "mnt", "admin", "tech" ]
 
         res = self.fetchRir("https://stat.ripe.net/data/whois/data.json?resource=" + asn)
         if res['content'] is None:
@@ -134,15 +137,13 @@ class sfp_ripe(SpiderFootPlugin):
 
         for rec in data:
             for d in rec:
-                if d["key"].lower().startswith("org") or \
-                        d["key"].lower().startswith("as") or \
-                        d["key"].lower().startswith("aut") or \
-                                d["key"].lower().startswith("descr") and \
-                                        d["value"].lower() not in ["null", "none", "none specified"]:
-                    if d["key"] in ownerinfo:
-                        ownerinfo[d["key"]].append(d["value"])
-                    else:
-                        ownerinfo[d["key"]] = [d["value"]]
+                for k in ownerkeys:
+                    if d['key'].lower().startswith(k):
+                        if d["value"].lower() not in ["null", "none", "none specified"]:
+                            if d["key"] in ownerinfo:
+                                ownerinfo[d["key"]].append(d["value"])
+                            else:
+                                ownerinfo[d["key"]] = [d["value"]]
 
         self.sf.debug("Returning ownerinfo: " + str(ownerinfo))
         return ownerinfo
@@ -190,12 +191,13 @@ class sfp_ripe(SpiderFootPlugin):
 
         return neighbours
 
-    # Determine whether there is a textual link between the target 
+    # Determine whether there is a textual link between the target
     # and the string supplied.
     def findName(self, string):
         # Simplest check to perform..
-        if self.getTarget().getValue() in string:
-            return True
+        for n in self.getTarget().getNames():
+            if n in string:
+                return True
 
         if self.keywords is None:
             self.keywords = self.sf.domainKeywords(self.getTarget().getNames(),
@@ -203,22 +205,21 @@ class sfp_ripe(SpiderFootPlugin):
 
         # Slightly more complex..
         rx = [
-            '^{0}[-_/\'\"\\\.,\?\! ]',
-            '[-_/\'\"\\\.,\?\! ]{0}$',
-            '[-_/\'\"\\\.,\?\! ]{0}[-_/\'\"\\\.,\?\! ]'
+            '^{0}[-_/\'\"\\\.,\?\!\s\d]',
+            '[-_/\'\"\\\.,\?\!\s]{0}$',
+            '[-_/\'\"\\\.,\?\!\s]{0}[-_/\'\"\\\.,\?\!\s\d]'
         ]
 
         # Mess with the keyword as a last resort..
-        keywordList = list()
+        keywordList = set()
         for kw in self.keywords:
             # Create versions of the keyword, esp. if hyphens are involved.
-            keywordList.append(kw)
-            keywordList.append(kw.replace('-', ' '))
-            keywordList.append(kw.replace('-', '_'))
-            keywordList.append(kw.replace('-', ''))
+            keywordList.add(kw)
+            keywordList.add(kw.replace('-', ' '))
+            keywordList.add(kw.replace('-', '_'))
+            keywordList.add(kw.replace('-', ''))
 
         for kw in keywordList:
-            self.sf.debug("Looking for keyword: " + kw)
             for r in rx:
                 if re.match(r.format(kw), string, re.IGNORECASE) is not None:
                     return True
@@ -232,7 +233,7 @@ class sfp_ripe(SpiderFootPlugin):
         owned = False
 
         if ownerinfo is not None:
-            for k in ownerinfo.keys():
+            for k in list(ownerinfo.keys()):
                 items = ownerinfo[k]
                 for item in items:
                     if self.findName(item.lower()):
@@ -269,7 +270,7 @@ class sfp_ripe(SpiderFootPlugin):
                 ownerinfo = self.asOwnerInfo(nasn)
                 ownertext = ''
                 if ownerinfo is not None:
-                    for k, v in ownerinfo.iteritems():
+                    for k, v in ownerinfo.items():
                         ownertext = ownertext + k + ": " + ', '.join(v) + "\n"
 
                     if len(ownerinfo) > 0:
@@ -292,9 +293,16 @@ class sfp_ripe(SpiderFootPlugin):
 
                         # Technically this netblock was identified via the AS, not
                         # the original IP event, so link it to asevt, not event.
+                        # Skip IPv6 for now
+                        if ":" in netblock:
+                            continue
                         evt = SpiderFootEvent("NETBLOCK_OWNER", netblock,
                                               self.__name__, event)
                         self.notifyListeners(evt)
+                    evt = SpiderFootEvent("RAW_RIR_DATA", self.lastContent, self.__name__,
+                                          event)
+                    self.notifyListeners(evt)
+
             return None
 
         # NETBLOCK -> AS and other owned netblocks
@@ -305,9 +313,12 @@ class sfp_ripe(SpiderFootPlugin):
                 self.sf.debug("Could not identify BGP AS for " + eventData)
                 return None
 
-            if self.ownsAs(asn):
+            if eventName == "NETBLOCK_OWNER" and self.ownsAs(asn):
                 asevt = SpiderFootEvent("BGP_AS_OWNER", asn, self.__name__, event)
                 self.notifyListeners(asevt)
+                evt = SpiderFootEvent("RAW_RIR_DATA", self.lastContent, self.__name__,
+                                      event)
+                self.notifyListeners(evt)
             else:
                 asevt = SpiderFootEvent("BGP_AS_MEMBER", asn, self.__name__, event)
                 self.notifyListeners(asevt)
@@ -328,11 +339,7 @@ class sfp_ripe(SpiderFootPlugin):
                 self.sf.debug("Could not identify BGP AS for " + prefix)
                 return None
 
-            if self.ownsAs(asn):
-                self.sf.info("Owned netblock found: " + prefix + "(" + asn + ")")
-                evt = SpiderFootEvent("NETBLOCK_OWNER", prefix, self.__name__, event)
-                self.notifyListeners(evt)
-            else:
+            if self.sf.validIpNetwork(prefix):
                 self.sf.info("Netblock found: " + prefix + "(" + asn + ")")
                 evt = SpiderFootEvent("NETBLOCK_MEMBER", prefix, self.__name__, event)
                 self.notifyListeners(evt)

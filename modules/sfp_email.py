@@ -14,10 +14,8 @@
 import re
 from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 
-
 class sfp_email(SpiderFootPlugin):
     """E-Mail:Footprint,Investigate,Passive:Content Analysis::Identify e-mail addresses in any obtained data."""
-
 
     # Default options
     opts = {
@@ -36,13 +34,18 @@ class sfp_email(SpiderFootPlugin):
 
     # What events is this module interested in for input
     def watchedEvents(self):
-        return ["*"]
+        return ["TARGET_WEB_CONTENT", "BASE64_DATA", "AFFILIATE_DOMAIN_WHOIS",
+                "CO_HOSTED_SITE_DOMAIN_WHOIS", "DOMAN_WHOIS", "NETBLOCK_WHOIS",
+                "LEAKSITE_CONTENT", "RAW_DNS_RECORDS", "RAW_FILE_META_DATA",
+                'RAW_RIR_DATA', "SEARCH_ENGINE_WEB_CONTENT", "SIMILARDOMAIN_WHOIS",
+                "SSL_CERTIFICATE_RAW", "SSL_CERTIFICATE_ISSUED", "TCP_PORT_OPEN_BANNER",
+                "WEBSERVER_BANNER", "WEBSERVER_HTTPHEADERS"]
 
     # What events this module produces
     # This is to support the end user in selecting modules based on events
     # produced.
     def producedEvents(self):
-        return ["EMAILADDR"]
+        return ["EMAILADDR", "AFFILIATE_EMAILADDR"]
 
     # Handle events sent to this module
     def handleEvent(self, event):
@@ -50,47 +53,37 @@ class sfp_email(SpiderFootPlugin):
         srcModuleName = event.module
         eventData = event.data
 
-        if eventName.startswith("EMAILADDR"):
-            return None
-
         self.sf.debug("Received event, " + eventName + ", from " + srcModuleName)
 
-        if type(eventData) not in [str, unicode]:
-            self.sf.debug("Unhandled type to find e-mails: " + str(type(eventData)))
-            return None
-
-        pat = re.compile("([\%a-zA-Z\.0-9_\-]+@[a-zA-Z\.0-9\-]+\.[a-zA-Z\.0-9\-]+)")
-        matches = re.findall(pat, eventData)
+        emails = self.sf.parseEmails(eventData)
         myres = list()
-        for match in matches:
-            if len(match) < 4:
-                self.sf.debug("Likely invalid address: " + match)
-                continue
+        for email in emails:
+            evttype = "EMAILADDR"
+            email = email.lower()
 
-            # Handle messed up encodings
-            if "%" in match:
-                self.sf.debug("Skipped address: " + match)
-                continue
+            # Get the domain and strip potential ending .
+            mailDom = email.lower().split('@')[1].strip('.')
+            if not self.sf.validHost(mailDom, self.opts['_internettlds']):
+                self.sf.debug("Skipping " + email + " as not a valid e-mail.")
+                return None
 
-            # Get the doain and strip potential ending .
-            mailDom = match.lower().split('@')[1].strip('.')
-            if not self.getTarget().matches(mailDom):
-                self.sf.debug("Ignoring e-mail address on an external domain: " + match)
-                continue
+            if not self.getTarget().matches(mailDom, includeChildren=True, includeParents=True) and not self.getTarget().matches(email):
+                self.sf.debug("External domain, so possible affiliate e-mail")
+                evttype = "AFFILIATE_EMAILADDR"
 
-            self.sf.info("Found e-mail address: " + match)
-            if type(match) == str:
-                mail = unicode(match.strip('.'), 'utf-8', errors='replace')
-            else:
-                mail = match.strip('.')
+            if eventName.startswith("AFFILIATE_"):
+                evttype = "AFFILIATE_EMAILADDR"
+
+            self.sf.info("Found e-mail address: " + email)
+            mail = email.strip('.')
 
             if mail in myres:
                 self.sf.debug("Already found from this source.")
                 continue
-            else:
-                myres.append(mail)
 
-            evt = SpiderFootEvent("EMAILADDR", mail, self.__name__, event)
+            myres.append(mail)
+
+            evt = SpiderFootEvent(evttype, mail, self.__name__, event)
             if event.moduleDataSource:
                 evt.moduleDataSource = event.moduleDataSource
             else:

@@ -11,6 +11,7 @@
 # -------------------------------------------------------------------------------
 
 import re
+
 from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 
 regexps = dict({
@@ -19,17 +20,18 @@ regexps = dict({
     "Github": list(['.*github.com/([a-zA-Z0-9_]+)\/']),
     "Google+": list(['.*plus.google.com/([0-9]+$)']),
     "Facebook": list(['.*facebook.com/([a-zA-Z0-9_]+$)']),
+    "MySpace": list(['https?://myspace.com/([a-zA-Z0-9_\.]+$)']),
     "YouTube": list(['.*youtube.com/([a-zA-Z0-9_]+$)']),
     "Twitter": list(['.*twitter.com/([a-zA-Z0-9_]{1,15}$)',
                      '.*twitter.com/#!/([a-zA-Z0-9_]{1,15}$)'
                      ]),
-    "SlideShare": list(['.*slideshare.net/([a-zA-Z0-9_]+$)'])
+    "SlideShare": list(['.*slideshare.net/([a-zA-Z0-9_]+$)']),
+    "Instagram": list(['.*instagram.com/([a-zA-Z0-9_\.]+)/?$'])
 })
 
 
 class sfp_social(SpiderFootPlugin):
-    """Social Networks:Footprint:Social Media::Identify presence on social media networks such as LinkedIn, Twitter and others."""
-
+    """Social Networks:Footprint,Passive:Social Media::Identify presence on social media networks such as LinkedIn, Twitter and others."""
 
     # Default options
     opts = {}
@@ -41,14 +43,14 @@ class sfp_social(SpiderFootPlugin):
         # to the end-user.
     }
 
-    results = dict()
+    results = None
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
-        self.results = dict()
+        self.results = self.tempStorage()
         self.__dataSource__ = "Target Website"
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
@@ -60,7 +62,7 @@ class sfp_social(SpiderFootPlugin):
     # This is to support the end user in selecting modules based on events
     # produced.
     def producedEvents(self):
-        return ["SOCIAL_MEDIA"]
+        return ["SOCIAL_MEDIA", "USERNAME"]
 
     # Handle events sent to this module
     def handleEvent(self, event):
@@ -70,19 +72,26 @@ class sfp_social(SpiderFootPlugin):
 
         self.sf.debug("Received event, " + eventName + ", from " + srcModuleName)
 
-        if eventData not in self.results.keys():
+        if eventData not in list(self.results.keys()):
             self.results[eventData] = True
         else:
             return None
 
-        for regexpGrp in regexps.keys():
+        for regexpGrp in list(regexps.keys()):
             for regex in regexps[regexpGrp]:
                 bits = re.match(regex, eventData, re.IGNORECASE)
                 if bits is not None:
                     self.sf.info("Matched " + regexpGrp + " in " + eventData)
-                    evt = SpiderFootEvent("SOCIAL_MEDIA", regexpGrp + ": " +
-                                          bits.group(1), self.__name__, event)
+                    evt = SpiderFootEvent("SOCIAL_MEDIA", regexpGrp + ": " + \
+                                          "<SFURL>" + eventData + "</SFURL>",
+                                          self.__name__, event)
                     self.notifyListeners(evt)
+
+                    # Except for Google+, the link includes potential usernames
+                    if regexpGrp != "Google+":
+                        un = bits.group(1)
+                        evt = SpiderFootEvent("USERNAME", bits.group(1), self.__name__, event)
+                        self.notifyListeners(evt)
 
         return None
 

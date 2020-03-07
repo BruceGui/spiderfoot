@@ -16,30 +16,31 @@ from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 class sfp_clearbit(SpiderFootPlugin):
     """Clearbit:Footprint,Investigate,Passive:Search Engines:apikey:Check for names, addresses, domains and more based on lookups of e-mail addresses on clearbit.com."""
 
-
     # Default options
-    opts = { 
+    opts = {
         "api_key": ""
     }
 
     # Option descriptions
     optdescs = {
-        "api_key": "Your API key from clearbit.com."
+        "api_key": "Clearbit.com API key."
     }
 
     # Be sure to completely clear any class variables in setup()
     # or you run the risk of data persisting between scan runs.
 
-    results = dict()
+    results = None
+    errorState = False
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
-        self.results = dict()
+        self.results = self.tempStorage()
+        self.errorState = False
 
         # Clear / reset any other class member variables here
         # or you risk them persisting between threads.
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
@@ -48,22 +49,27 @@ class sfp_clearbit(SpiderFootPlugin):
 
     # What events this module produces
     def producedEvents(self):
-        return [ "HUMAN_NAME", "PHONE_NUMBER", "PHYSICAL_ADDRESS",
+        return [ "RAW_RIR_DATA", "PHONE_NUMBER", "PHYSICAL_ADDRESS",
                  "AFFILIATE_INTERNET_NAME", "EMAILADDR" ]
 
     def query(self, t):
         ret = None
 
+        api_key = self.opts['api_key']
+        if type(api_key) == str:
+            api_key = api_key.encode('utf-8')
         url = "https://person.clearbit.com/v2/combined/find?email=" + t
+        token = base64.b64encode(api_key + ':'.encode('utf-8'))
         headers = {
             'Accept': 'application/json',
-            'Authorization': "Basic " + base64.b64encode(self.opts['api_key'] + ":")
+            'Authorization': "Basic " + token.decode('utf-8')
         }
-        res = self.sf.fetchUrl(url, timeout=self.opts['_fetchtimeout'], 
+
+        res = self.sf.fetchUrl(url, timeout=self.opts['_fetchtimeout'],
             useragent="SpiderFoot", headers=headers)
 
         if res['code'] != "200":
-            self.sf.error("Return code indicates no results or potential API key failure.", 
+            self.sf.error("Return code indicates no results or potential API key failure or exceeded limits.",
                        False)
             return None
 
@@ -82,10 +88,18 @@ class sfp_clearbit(SpiderFootPlugin):
         srcModuleName = event.module
         eventData = event.data
 
+        if self.errorState:
+            return None
+
+        if self.opts['api_key'] == "":
+            self.sf.error("You enabled sfp_clearbit but did not set an API key!", False)
+            self.errorState = True
+            return None
+
         self.sf.debug("Received event, " + eventName + ", from " + srcModuleName)
 
-       # Don't look up stuff twice
-        if self.results.has_key(eventData):
+        # Don't look up stuff twice
+        if eventData in self.results:
             self.sf.debug("Skipping " + eventData + " as already mapped.")
             return None
         else:
@@ -99,7 +113,8 @@ class sfp_clearbit(SpiderFootPlugin):
             # Get the name associated with the e-mail
             if "person" in data:
                 name = data['person']['name']['fullName']
-                evt = SpiderFootEvent("HUMAN_NAME", name, self.__name__, event)
+                evt = SpiderFootEvent("RAW_RIR_DATA", "Possible full name: " + name,
+                                      self.__name__, event)
                 self.notifyListeners(evt)
         except Exception:
             self.sf.debug("Unable to extract name from JSON.")
@@ -133,7 +148,7 @@ class sfp_clearbit(SpiderFootPlugin):
             if "company" in data:
                 if 'domainAliases' in data['company']:
                     for d in data['company']['domainAliases']:
-                        evt = SpiderFootEvent("AFFILIATE_INTERNET_NAME", d, 
+                        evt = SpiderFootEvent("AFFILIATE_INTERNET_NAME", d,
                                               self.__name__, event)
                         self.notifyListeners(evt)
 
@@ -151,7 +166,7 @@ class sfp_clearbit(SpiderFootPlugin):
                 # the location of the employer.
                 if 'geo' in data['company']:
                     loc = ""
-    
+
                     if 'streetNumber' in data['company']['geo']:
                         loc += data['company']['geo']['streetNumber'] + ", "
                     if 'streetName' in data['company']['geo']:

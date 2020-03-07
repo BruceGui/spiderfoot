@@ -9,18 +9,17 @@
 # Licence:     GPL
 #-------------------------------------------------------------------------------
 
-import sys
 import json
 import datetime
-import urllib
+import urllib.request, urllib.parse, urllib.error
 from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 
 class sfp_wigle(SpiderFootPlugin):
-    """Wigle.net:Footprint,Investigate,Passive:Secondary Networks::Query wigle.net to identify nearby WiFi access points."""
+    """Wigle.net:Footprint,Investigate,Passive:Secondary Networks:apikey:Query wigle.net to identify nearby WiFi access points."""
 
 
     # Default options
-    opts = { 
+    opts = {
         "api_key_encoded": "",
         "days_limit": "365",
         "variance": "0.01"
@@ -28,27 +27,27 @@ class sfp_wigle(SpiderFootPlugin):
 
     # Option descriptions
     optdescs = {
-        "api_key_encoded": "Your Base64-encoded API name/token pair, as provided on your Wigle.net account page.",
+        "api_key_encoded": "Wigle.net base64-encoded API name/token pair.",
         "days_limit": "Maximum age of data to be considered valid.",
         "variance": "How tightly to bound queries against the latitude/longitude box extracted from idenified addresses. This value must be between 0.001 and 0.2."
-    
+
     }
 
     # Be sure to completely clear any class variables in setup()
     # or you run the risk of data persisting between scan runs.
 
-    results = dict()
+    results = None
     errorState = False
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
-        self.results = dict()
+        self.results = self.tempStorage()
         self.errorState = False
 
         # Clear / reset any other class member variables here
         # or you risk them persisting between threads.
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
@@ -61,13 +60,13 @@ class sfp_wigle(SpiderFootPlugin):
 
     def getcoords(self, qry):
         url = "https://api.wigle.net/api/v2/network/geocode?" + \
-              urllib.urlencode({'addresscode': unicode.encode(qry, 'utf-8', errors='replace')})
-        hdrs = { 
+              urllib.parse.urlencode({'addresscode': qry.encode('utf-8', errors='replace')})
+        hdrs = {
                     "Accept": "application/json",
                     "Authorization": "Basic " + self.opts['api_key_encoded']
                }
 
-        res = self.sf.fetchUrl(url, timeout=30, 
+        res = self.sf.fetchUrl(url, timeout=30,
                                useragent="SpiderFoot", headers=hdrs)
         if res['code'] == "404" or not res['content']:
             return None
@@ -138,7 +137,7 @@ class sfp_wigle(SpiderFootPlugin):
 
         self.sf.debug("Received event, " + eventName + ", from " + srcModuleName)
 
-       # Don't look up stuff twice
+        # Don't look up stuff twice
         if eventData in self.results:
             self.sf.debug("Skipping " + eventData + " as already mapped.")
             return None

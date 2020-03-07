@@ -15,47 +15,45 @@
 import re
 from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 
-
 class sfp_pgp(SpiderFootPlugin):
     """PGP Key Look-up:Footprint,Investigate,Passive:Public Registries::Look up e-mail addresses in PGP public key servers."""
 
-
-    results = list()
+    results = None
 
     # Default options
     opts = {
         # options specific to this module
-        'keyserver1_search': "http://pgp.mit.edu/pks/lookup?op=index&search=",
-        'keyserver1_fetch': "http://pgp.mit.edu/pks/lookup?op=get&search=",
-        'keyserver2_search': "https://hkps.pool.sks-keyservers.net/pks/lookup?op=vindex&search=",
-        'keyserver2_fetch': "https://hkps.pool.sks-keyservers.net/pks/lookup?op=get&search="
+        'keyserver_search1': "https://pgp.key-server.io/pks/lookup?fingerprint=on&op=vindex&search=",
+        'keyserver_fetch1': "https://pgp.key-server.io/pks/lookup?op=get&search=",
+        'keyserver_search2': "http://the.earth.li:11371/pks/lookup?op=index&search=",
+        'keyserver_fetch2': "http://the.earth.li:11371/pks/lookup?op=get&search="
     }
 
     # Option descriptions
     optdescs = {
-        'keyserver1_search': "PGP public key server URL to find e-mail addresses on a domain. Domain will get appended.",
-        'keyserver1_fetch': "PGP public key server URL to find the public key for an e-mail address. Email address will get appended.",
-        'keyserver2_search': "Backup PGP public key server URL to find e-mail addresses on a domain. Domain will get appended.",
-        'keyserver2_fetch': "Backup PGP public key server URL to find the public key for an e-mail address. Email address will get appended."
+        'keyserver_search1': "PGP public key server URL to find e-mail addresses on a domain. Domain will get appended.",
+        'keyserver_fetch1': "PGP public key server URL to find the public key for an e-mail address. Email address will get appended.",
+        'keyserver_search2': "Backup PGP public key server URL to find e-mail addresses on a domain. Domain will get appended.",
+        'keyserver_fetch2': "Backup PGP public key server URL to find the public key for an e-mail address. Email address will get appended."
     }
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
         self.__dataSource__ = "PGP Key Servers"
-        self.results = list()
+        self.results = self.tempStorage()
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
     def watchedEvents(self):
-        return ["EMAILADDR", "DOMAIN_NAME"]
+        return ['INTERNET_NAME', "EMAILADDR", "DOMAIN_NAME"]
 
     # What events this module produces
     # This is to support the end user in selecting modules based on events
     # produced.
     def producedEvents(self):
-        return ["EMAILADDR", "PGP_KEY"]
+        return ["EMAILADDR", "AFFILIATE_EMAILADDR", "PGP_KEY"]
 
     # Handle events sent to this module
     def handleEvent(self, event):
@@ -66,50 +64,45 @@ class sfp_pgp(SpiderFootPlugin):
         if eventData in self.results:
             return None
         else:
-            self.results.append(eventData)
+            self.results[eventData] = True
 
         self.sf.debug("Received event, " + eventName + ", from " + srcModuleName)
 
         # Get e-mail addresses on this domain
-        if eventName == "DOMAIN_NAME":
-            res = self.sf.fetchUrl(self.opts['keyserver1_search'] + eventData,
+        if eventName in ["DOMAIN_NAME", "INTERNET_NAME"]:
+            res = self.sf.fetchUrl(self.opts['keyserver_search1'] + eventData,
                                    timeout=self.opts['_fetchtimeout'],
                                    useragent=self.opts['_useragent'])
 
-            if res['content'] is None:
-                res = self.sf.fetchUrl(self.opts['keyserver2_search'] + eventData,
+            if res['content'] is None or res['code'] == "503":
+                res = self.sf.fetchUrl(self.opts['keyserver_search2'] + eventData,
                                        timeout=self.opts['_fetchtimeout'],
                                        useragent=self.opts['_useragent'])
 
-            if res['content'] is not None:
-                pat = re.compile("([a-zA-Z\.0-9_\-]+@[a-zA-Z\.0-9\-]+\.[a-zA-Z\.0-9\-]+)")
-                matches = re.findall(pat, res['content'])
-                for match in matches:
-                    self.sf.debug("Found possible email: " + match)
-                    if len(match) < 4:
-                        self.sf.debug("Likely invalid address.")
-                        continue
+            if res['content'] is not None and res['code'] != "503":
+                emails = self.sf.parseEmails(res['content'])
+                for email in emails:
+                    evttype = "EMAILADDR"
 
-                    mailDom = match.lower().split('@')[1]
-                    if not self.getTarget().matches(mailDom):
-                        self.sf.debug("Ignoring e-mail address on an external domain: " + match)
-                        continue
+                    mailDom = email.lower().split('@')[1]
+                    if not self.getTarget().matches(mailDom, includeChildren=True, includeParents=True):
+                        evttype = "AFFILIATE_EMAILADDR"
 
-                    self.sf.info("Found e-mail address: " + match)
-                    evt = SpiderFootEvent("EMAILADDR", match, self.__name__, event)
+                    self.sf.info("Found e-mail address: " + email)
+                    evt = SpiderFootEvent(evttype, email, self.__name__, event)
                     self.notifyListeners(evt)
 
         if eventName == "EMAILADDR":
-            res = self.sf.fetchUrl(self.opts['keyserver1_fetch'] + eventData,
+            res = self.sf.fetchUrl(self.opts['keyserver_fetch1'] + eventData,
                                    timeout=self.opts['_fetchtimeout'],
                                    useragent=self.opts['_useragent'])
 
-            if res['content'] is None:
-               res = self.sf.fetchUrl(self.opts['keyserver2_fetch'] + eventData,
-                                      timeout=self.opts['_fetchtimeout'],
-                                      useragent=self.opts['_useragent'])
+            if res['content'] is None or res['code'] == "503":
+                res = self.sf.fetchUrl(self.opts['keyserver_fetch2'] + eventData,
+                                       timeout=self.opts['_fetchtimeout'],
+                                       useragent=self.opts['_useragent'])
 
-            if res['content'] is not None:
+            if res['content'] is not None and res['code'] != "503":
                 pat = re.compile("(-----BEGIN.*END.*BLOCK-----)", re.MULTILINE | re.DOTALL)
                 matches = re.findall(pat, res['content'])
                 for match in matches:

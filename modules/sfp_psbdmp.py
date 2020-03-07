@@ -9,9 +9,9 @@
 # Licence:     GPL
 #-------------------------------------------------------------------------------
 
-import sys
+import re
+
 import json
-import time
 from sflib import SpiderFoot, SpiderFootPlugin, SpiderFootEvent
 
 class sfp_psbdmp(SpiderFootPlugin):
@@ -19,7 +19,7 @@ class sfp_psbdmp(SpiderFootPlugin):
 
 
     # Default options
-    opts = { 
+    opts = {
     }
 
     # Option descriptions
@@ -29,16 +29,16 @@ class sfp_psbdmp(SpiderFootPlugin):
     # Be sure to completely clear any class variables in setup()
     # or you run the risk of data persisting between scan runs.
 
-    results = dict()
+    results = None
 
     def setup(self, sfc, userOpts=dict()):
         self.sf = sfc
-        self.results = dict()
+        self.results = self.tempStorage()
 
         # Clear / reset any other class member variables here
         # or you risk them persisting between threads.
 
-        for opt in userOpts.keys():
+        for opt in list(userOpts.keys()):
             self.opts[opt] = userOpts[opt]
 
     # What events is this module interested in for input
@@ -57,14 +57,14 @@ class sfp_psbdmp(SpiderFootPlugin):
         ret = None
 
         if "@" in qry:
-            url = "http://psbdmp.cc/api/search/email/" + qry
+            url = "https://psbdmp.cc/api/search/email/" + qry
         else:
-            url = "http://psbdmp.cc/api/search/domain/" + qry
+            url = "https://psbdmp.cc/api/search/domain/" + qry
 
-        res = self.sf.fetchUrl(url, timeout=self.opts['_fetchtimeout'], 
+        res = self.sf.fetchUrl(url, timeout=15,
             useragent="SpiderFoot")
 
-        if res['code'] == "403":
+        if res['code'] == "403" or res['content'] is None:
             self.sf.info("Unable to fetch data from psbdmp.cc right now.")
             return None
 
@@ -73,16 +73,16 @@ class sfp_psbdmp(SpiderFootPlugin):
         except Exception as e:
             self.sf.error("Error processing JSON response from psbdmp.cc: " + str(e), False)
             return None
-        
+
         ids = list()
         if 'count' in ret:
             if ret['count'] > 0:
                 for d in ret['data']:
-                    ids.append("http://psbdmp.cc/" + d['id'])
+                    ids.append("https://psbdmp.cc/" + d['id'])
             else:
                 return None
         else:
-            return None    
+            return None
 
         return ids
 
@@ -94,8 +94,8 @@ class sfp_psbdmp(SpiderFootPlugin):
 
         self.sf.debug("Received event, " + eventName + ", from " + srcModuleName)
 
-       # Don't look up stuff twice
-        if self.results.has_key(eventData):
+        # Don't look up stuff twice
+        if eventData in self.results:
             self.sf.debug("Skipping " + eventData + " as already mapped.")
             return None
         else:
@@ -108,5 +108,26 @@ class sfp_psbdmp(SpiderFootPlugin):
         for n in data:
             e = SpiderFootEvent("LEAKSITE_URL", n, self.__name__, event)
             self.notifyListeners(e)
+
+            res = self.sf.fetchUrl(n, timeout=self.opts['_fetchtimeout'],
+                                   useragent=self.opts['_useragent'])
+
+            if res['content'] is None:
+                self.sf.debug("Ignoring " + n + " as no data returned")
+                continue
+
+            # Sometimes pastes search results false positives
+            if re.search("[^a-zA-Z\-\_0-9]" + re.escape(eventData) +
+                         "[^a-zA-Z\-\_0-9]", res['content'], re.IGNORECASE) is None:
+                continue
+
+            try:
+                startIndex = res['content'].index(eventData)
+            except BaseException as e:
+                self.sf.debug("String not found in pastes content.")
+                continue
+
+            evt = SpiderFootEvent("LEAKSITE_CONTENT", res['content'], self.__name__, e)
+            self.notifyListeners(evt)
 
 # End of sfp_psbdmp class
